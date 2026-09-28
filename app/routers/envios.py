@@ -1,6 +1,8 @@
+import os
 import uuid
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -12,7 +14,10 @@ from ..schemas import (
     EnvioCrear, EnvioEventoLeer, EnvioLeer, EnvioActualizarEstado,
 )
 
+FLEET_SERVICE_URL = os.getenv("FLEET_SERVICE_URL")
+
 router = APIRouter(prefix="/envios", tags=["envios"])
+
 
 def _obtener_envio_o_404(db: Session, envio_id: uuid.UUID) -> Envio:
     envio = db.query(Envio).filter(Envio.id == envio_id).first()
@@ -20,8 +25,26 @@ def _obtener_envio_o_404(db: Session, envio_id: uuid.UUID) -> Envio:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Envío no encontrado")
     return envio
 
+
 def _registrar_evento(db: Session, envio_id: uuid.UUID, tipo_evento: str, notas: Optional[str] = None) -> None:
     db.add(EnvioEvento(envio_id=envio_id, tipo_evento=tipo_evento, notas=notas))
+
+
+async def _liberar_vehiculo(vehiculo_id):
+    """Cierra el hueco de 'vehiculos.estado nunca cambia': al completar o
+    devolver un envío, libera el vehículo de vuelta a 'active' en Fleet
+    Service, siempre que Shipment sepa cuál vehículo era (ver 'asignar' abajo)."""
+    if not FLEET_SERVICE_URL or not vehiculo_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.patch(
+                f"{FLEET_SERVICE_URL}/vehiculos/{vehiculo_id}/estado",
+                json={"estado": "active"},
+            )
+    except Exception as exc:
+        print(f"[shipment] no se pudo liberar el vehículo {vehiculo_id}: {exc}")
+
 
 @router.post("/", response_model=EnvioLeer, status_code=status.HTTP_201_CREATED)
 async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
@@ -44,6 +67,7 @@ async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
     })
     return envio
 
+
 @router.get("/", response_model=list[EnvioLeer])
 def listar_envios(estado: Optional[str] = None, cliente_id: Optional[uuid.UUID] = None, db: Session = Depends(get_db)):
     query = db.query(Envio)
@@ -53,9 +77,11 @@ def listar_envios(estado: Optional[str] = None, cliente_id: Optional[uuid.UUID] 
         query = query.filter(Envio.cliente_id == cliente_id)
     return query.order_by(Envio.creado_en.desc()).all()
 
+
 @router.get("/{envio_id}", response_model=EnvioLeer)
 def obtener_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
     return _obtener_envio_o_404(db, envio_id)
+
 
 @router.get("/{envio_id}/eventos", response_model=list[EnvioEventoLeer])
 def obtener_eventos_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
@@ -67,6 +93,7 @@ def obtener_eventos_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
         .all()
     )
 
+
 @router.patch("/{envio_id}/asignar", response_model=EnvioLeer)
 def asignar_envio(envio_id: uuid.UUID, payload: EnvioAsignar, db: Session = Depends(get_db)):
     envio = _obtener_envio_o_404(db, envio_id)
@@ -76,6 +103,7 @@ def asignar_envio(envio_id: uuid.UUID, payload: EnvioAsignar, db: Session = Depe
     db.commit()
     db.refresh(envio)
     return envio
+
 
 @router.patch("/{envio_id}/estado", response_model=EnvioLeer)
 async def actualizar_estado_envio(envio_id: uuid.UUID, payload: EnvioActualizarEstado, db: Session = Depends(get_db)):
@@ -89,7 +117,10 @@ async def actualizar_estado_envio(envio_id: uuid.UUID, payload: EnvioActualizarE
         await publish_event("shipment.incident", {"envio_id": str(envio.id), "notas": payload.notas})
     elif payload.estado == "devuelto":
         await publish_event("shipment.returned", {"envio_id": str(envio.id), "notas": payload.notas})
+        if envio.vehiculo_id:
+            await _liberar_vehiculo(str(envio.vehiculo_id))
     return envio
+
 
 @router.post("/{envio_id}/prueba-entrega", response_model=PruebaEntregaLeer, status_code=status.HTTP_201_CREATED)
 async def registrar_prueba_entrega(envio_id: uuid.UUID, payload: PruebaEntregaCrear, db: Session = Depends(get_db)):
@@ -111,4 +142,6 @@ async def registrar_prueba_entrega(envio_id: uuid.UUID, payload: PruebaEntregaCr
         "entregado_en": prueba.entregado_en,
         "nombre_receptor": prueba.nombre_receptor,
     })
+    if envio.vehiculo_id:
+        await _liberar_vehiculo(str(envio.vehiculo_id))
     return prueba
