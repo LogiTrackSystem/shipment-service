@@ -1,53 +1,95 @@
 import json
-import logging
 import os
-from typing import Any, Optional
+import uuid
 
 import aio_pika
-from dotenv import load_dotenv
+from sqlalchemy.orm import Session
 
-load_dotenv()
+from .database import SessionLocal
+from .models import Envio, EnvioEvento
 
-logger = logging.getLogger("shipment-service.events")
-
-RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 EXCHANGE_NAME = "logitrack_events"
 
-_connection: Optional[aio_pika.RobustConnection] = None
-_exchange: Optional[aio_pika.abc.AbstractExchange] = None
 
-async def get_exchange() -> aio_pika.abc.AbstractExchange:
-    global _connection, _exchange
-    if _exchange is not None and _connection is not None and not _connection.is_closed:
-        return _exchange
-    _connection = await aio_pika.connect_robust(RABBITMQ_URL)
-    channel = await _connection.channel()
-    _exchange = await channel.declare_exchange(
-        EXCHANGE_NAME, aio_pika.ExchangeType.TOPIC, durable=True
-    )
-    return _exchange
-
-async def publish_event(routing_key: str, payload: dict[str, Any]) -> None:
-    try:
-        exchange = await get_exchange()
+async def publish_event(routing_key: str, payload: dict):
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    async with connection:
+        channel = await connection.channel()
+        exchange = await channel.declare_exchange(
+            EXCHANGE_NAME, aio_pika.ExchangeType.TOPIC, durable=True
+        )
         message = aio_pika.Message(
-            body=json.dumps(payload, default=str).encode("utf-8"),
+            body=json.dumps(payload, default=str).encode(),
             content_type="application/json",
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
         )
         await exchange.publish(message, routing_key=routing_key)
-        logger.info("Evento publicado: %s -> %s", routing_key, payload.get("envio_id"))
-    except Exception as exc:
-        logger.warning("No se pudo publicar el evento '%s': %s", routing_key, exc)
 
-async def check_rabbitmq() -> bool:
+
+async def _procesar_customs_held(payload: dict):
+    """Cierra el hueco de Customs Service: cuando aduanas retiene un envío
+    internacional, Shipment Service refleja esa retención en su propio
+    estado (sin que Customs escriba directamente en esta base de datos —
+    Database per Service se mantiene, la comunicación es por evento)."""
+    db: Session = SessionLocal()
     try:
-        await get_exchange()
-        return True
-    except Exception:
-        return False
+        envio_id = uuid.UUID(payload["envio_id"])
+        envio = db.query(Envio).filter(Envio.id == envio_id).first()
+        if envio is None:
+            return
+        envio.estado = "retenido_aduana"
+        db.add(EnvioEvento(
+            envio_id=envio.id,
+            tipo_evento="retenido_aduana",
+            notas=payload.get("motivo_retencion", "retenido en aduana"),
+        ))
+        db.commit()
+    finally:
+        db.close()
 
-async def close_connection() -> None:
-    global _connection
-    if _connection is not None and not _connection.is_closed:
-        await _connection.close()
+
+async def _procesar_customs_cleared(payload: dict):
+    db: Session = SessionLocal()
+    try:
+        envio_id = uuid.UUID(payload["envio_id"])
+        envio = db.query(Envio).filter(Envio.id == envio_id).first()
+        if envio is None:
+            return
+        if envio.estado == "retenido_aduana":
+            envio.estado = "en_transito"
+        db.add(EnvioEvento(
+            envio_id=envio.id,
+            tipo_evento="liberado_aduana",
+            notas="declaración aduanera aprobada",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+_HANDLERS = {
+    "customs.held": _procesar_customs_held,
+    "customs.cleared": _procesar_customs_cleared,
+}
+
+
+async def _on_message(message: aio_pika.IncomingMessage):
+    async with message.process():
+        payload = json.loads(message.body.decode())
+        handler = _HANDLERS.get(message.routing_key)
+        if handler:
+            await handler(payload)
+
+
+async def iniciar_consumidor():
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    channel = await connection.channel()
+    exchange = await channel.declare_exchange(
+        EXCHANGE_NAME, aio_pika.ExchangeType.TOPIC, durable=True
+    )
+    queue = await channel.declare_queue("shipment_service.eventos", durable=True)
+    await queue.bind(exchange, routing_key="customs.held")
+    await queue.bind(exchange, routing_key="customs.cleared")
+    await queue.consume(_on_message)
+    return connection

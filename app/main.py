@@ -1,25 +1,21 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
-from .database import engine_healthcheck
-from .events import check_rabbitmq, close_connection
 from .routers import envios
+from .events import iniciar_consumidor
 
-app = FastAPI(title="Shipment Service")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    connection = await iniciar_consumidor()
+    yield
+    await connection.close()
+
+
+app = FastAPI(title="Shipment Service", lifespan=lifespan)
 app.include_router(envios.router)
 
-@app.get("/health")
-async def health():
-    db_ok = engine_healthcheck()
-    rabbitmq_ok = await check_rabbitmq()
-    return {
-        "status": "ok" if db_ok and rabbitmq_ok else "degraded",
-        "service": "shipment-service",
-        "dependencies": {
-            "database": "ok" if db_ok else "down",
-            "rabbitmq": "ok" if rabbitmq_ok else "down",
-        },
-    }
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    await close_connection()
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "shipment-service"}
