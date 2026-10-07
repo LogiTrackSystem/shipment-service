@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
-from .routers import envios
+from .routers import clientes, envios
 from .events import iniciar_consumidor
 
 
@@ -14,6 +14,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Shipment Service", lifespan=lifespan)
 app.include_router(envios.router)
+app.include_router(clientes.router)
 
 
 @app.get("/health")

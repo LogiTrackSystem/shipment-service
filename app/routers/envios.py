@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..models import Cliente, PruebaEntrega, Envio, EnvioEvento
 from ..events import publish_event
 from ..models import PruebaEntrega, Envio, EnvioEvento
 from ..schemas import (
@@ -48,25 +49,52 @@ async def _liberar_vehiculo(vehiculo_id):
 
 @router.post("/", response_model=EnvioLeer, status_code=status.HTTP_201_CREATED)
 async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
-    envio = Envio(**payload.model_dump())
+    if payload.codigo_cliente is not None:
+        cliente = db.query(Cliente).filter(Cliente.codigo_cliente == payload.codigo_cliente).first()
+    else:
+        cliente = db.query(Cliente).filter(Cliente.id == payload.cliente_id).first()
+    if cliente is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="El cliente no existe. Regístrelo primero en POST /clientes/",
+        )
+    if not cliente.activo:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"El cliente {cliente.codigo_cliente} está inactivo",
+        )
+
+    datos = payload.model_dump(exclude={"cliente_id", "codigo_cliente"})
+    envio = Envio(cliente_id=cliente.id, **datos)
     db.add(envio)
     db.commit()
     db.refresh(envio)
     _registrar_evento(db, envio.id, "creado")
     db.commit()
+    db.refresh(envio)
 
     await publish_event("shipment.created", {
         "envio_id": str(envio.id),
+        "codigo_envio": envio.codigo_envio,
         "cliente_id": str(envio.cliente_id),
+        "codigo_cliente": cliente.codigo_cliente,
         "origen": envio.origen,
         "destino": envio.destino,
         "es_internacional": envio.es_internacional,
+        "tipo_carga": envio.tipo_carga,
+        "es_hazmat": envio.es_hazmat,
         "peso_kg": float(envio.peso_kg),
         "volumen_m3": float(envio.volumen_m3) if envio.volumen_m3 is not None else None,
         "fecha_limite_sla": envio.fecha_limite_sla,
     })
     return envio
 
+@router.get("/codigo/{codigo_envio}", response_model=EnvioLeer)
+def obtener_envio_por_codigo(codigo_envio: str, db: Session = Depends(get_db)):
+    envio = db.query(Envio).filter(Envio.codigo_envio == codigo_envio.strip().upper()).first()
+    if envio is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Envío no encontrado")
+    return envio
 
 @router.get("/", response_model=list[EnvioLeer])
 def listar_envios(estado: Optional[str] = None, cliente_id: Optional[uuid.UUID] = None, db: Session = Depends(get_db)):
