@@ -6,6 +6,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from ..routing_client import obtener_ruta_maestra
 from ..database import get_db
 from ..models import Cliente, PruebaEntrega, Envio, EnvioEvento
 from ..events import publish_event
@@ -49,6 +50,7 @@ async def _liberar_vehiculo(vehiculo_id):
 
 @router.post("/", response_model=EnvioLeer, status_code=status.HTTP_201_CREATED)
 async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
+    # 1) Cliente (falla rápida, es una consulta local)
     if payload.codigo_cliente is not None:
         cliente = db.query(Cliente).filter(Cliente.codigo_cliente == payload.codigo_cliente).first()
     else:
@@ -64,12 +66,48 @@ async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
             detail=f"El cliente {cliente.codigo_cliente} está inactivo",
         )
 
-    datos = payload.model_dump(exclude={"cliente_id", "codigo_cliente"})
-    envio = Envio(cliente_id=cliente.id, **datos)
+    # 2) Origen, destino y ruta: una sola consulta a Routing los valida y calcula
+    ruta = await obtener_ruta_maestra(
+        payload.origen_id, payload.origen_codigo, payload.destino_id, payload.destino_codigo
+    )
+    origen, destino = ruta["origen"], ruta["destino"]
+
+    # 3) Nacional / internacional se deduce de los países de las ubicaciones
+    es_internacional = origen["codigo_pais"] != destino["codigo_pais"]
+    if payload.es_internacional is not None and payload.es_internacional != es_internacional:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"es_internacional={str(payload.es_internacional).lower()} contradice las ubicaciones: "
+                f"origen en {origen['pais']}, destino en {destino['pais']}. "
+                "Puede omitir el campo: el sistema lo deduce."
+            ),
+        )
+
+    # 4) Se guarda como 'pendiente'; la asignación de vehículo y conductor ocurre después, por eventos
+    datos = payload.model_dump(exclude={
+        "cliente_id", "codigo_cliente", "origen_id", "origen_codigo",
+        "destino_id", "destino_codigo", "es_internacional",
+    })
+    envio = Envio(
+        cliente_id=cliente.id,
+        origen=origen["etiqueta"],
+        destino=destino["etiqueta"],
+        origen_id=uuid.UUID(origen["id"]),
+        destino_id=uuid.UUID(destino["id"]),
+        codigo_pais_origen=origen["codigo_pais"],
+        codigo_pais_destino=destino["codigo_pais"],
+        es_internacional=es_internacional,
+        ruta_maestra_id=uuid.UUID(ruta["id"]),
+        codigo_ruta=ruta["codigo_ruta"],
+        distancia_km=ruta["distancia_km"],
+        duracion_horas=ruta["duracion_horas"],
+        **datos,
+    )
     db.add(envio)
     db.commit()
     db.refresh(envio)
-    _registrar_evento(db, envio.id, "creado")
+    _registrar_evento(db, envio.id, "creado", notas=f"ruta {envio.codigo_ruta}, {envio.distancia_km} km")
     db.commit()
     db.refresh(envio)
 
@@ -80,6 +118,16 @@ async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
         "codigo_cliente": cliente.codigo_cliente,
         "origen": envio.origen,
         "destino": envio.destino,
+        "origen_id": str(envio.origen_id),
+        "destino_id": str(envio.destino_id),
+        "pais_origen": origen["pais"],
+        "pais_destino": destino["pais"],
+        "codigo_pais_origen": envio.codigo_pais_origen,
+        "codigo_pais_destino": envio.codigo_pais_destino,
+        "ruta_maestra_id": str(envio.ruta_maestra_id),
+        "codigo_ruta": envio.codigo_ruta,
+        "distancia_km": float(envio.distancia_km),
+        "duracion_horas": float(envio.duracion_horas),
         "es_internacional": envio.es_internacional,
         "tipo_carga": envio.tipo_carga,
         "es_hazmat": envio.es_hazmat,

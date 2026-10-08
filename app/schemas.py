@@ -59,21 +59,26 @@ class ClienteLeer(BaseModel):
 class EnvioCrear(BaseModel):
     cliente_id: Optional[uuid.UUID] = None
     codigo_cliente: Optional[int] = None
-    origen: str = Field(..., max_length=255)
-    destino: str = Field(..., max_length=255)
+    origen_id: Optional[uuid.UUID] = None
+    origen_codigo: Optional[str] = Field(None, max_length=12)
+    destino_id: Optional[uuid.UUID] = None
+    destino_codigo: Optional[str] = Field(None, max_length=12)
     fecha_limite_sla: Optional[datetime] = None
-    es_internacional: bool = False
+    es_internacional: Optional[bool] = None
     peso_kg: Decimal = Field(..., gt=0)
     volumen_m3: Optional[Decimal] = Field(None, ge=0)
     tipo_carga: Literal["general", "refrigerada"] = "general"
     es_hazmat: bool = False
 
     @model_validator(mode="after")
-    def _un_solo_cliente(self):
+    def _referencias(self):
         if (self.cliente_id is None) == (self.codigo_cliente is None):
             raise ValueError("Debe enviar cliente_id o codigo_cliente (solo uno de los dos)")
+        if (self.origen_id is None) == (self.origen_codigo is None):
+            raise ValueError("Debe enviar origen_id o origen_codigo (solo uno de los dos)")
+        if (self.destino_id is None) == (self.destino_codigo is None):
+            raise ValueError("Debe enviar destino_id o destino_codigo (solo uno de los dos)")
         return self
-
 
 class EnvioAsignar(BaseModel):
     vehiculo_id: uuid.UUID
@@ -107,6 +112,10 @@ class EnvioLeer(BaseModel):
     codigo_cliente: Optional[int] = None
     origen: str
     destino: str
+    origen_id: Optional[uuid.UUID] = None
+    destino_id: Optional[uuid.UUID] = None
+    codigo_pais_origen: Optional[str] = None
+    codigo_pais_destino: Optional[str] = None
     estado: str
     fecha_limite_sla: Optional[datetime] = None
     es_internacional: bool
@@ -114,11 +123,14 @@ class EnvioLeer(BaseModel):
     es_hazmat: bool
     peso_kg: Decimal
     volumen_m3: Optional[Decimal] = None
+    ruta_maestra_id: Optional[uuid.UUID] = None
+    codigo_ruta: Optional[str] = None
+    distancia_km: Optional[Decimal] = None
+    duracion_horas: Optional[Decimal] = None
     vehiculo_id: Optional[uuid.UUID] = None
     ruta_id: Optional[uuid.UUID] = None
     creado_en: datetime
     actualizado_en: datetime
-
 
 class PruebaEntregaLeer(BaseModel):
     model_config = ConfigDict(from_attributes=True)
