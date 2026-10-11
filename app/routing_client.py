@@ -51,3 +51,34 @@ async def obtener_ruta_maestra(origen_id, origen_codigo, destino_id, destino_cod
         status_code=502,
         detail={"codigo": "ROUTING_ERROR", "mensaje": f"El servicio de rutas respondió con error {resp.status_code}"},
     )
+
+
+async def reintentar_asignacion(envio_id) -> dict:
+    """Pide a Routing que reintente ahora la asignación de un envío en espera."""
+    if not ROUTING_SERVICE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail={"codigo": "ROUTING_NO_CONFIGURADO", "mensaje": "Falta ROUTING_SERVICE_URL en Shipment Service"},
+        )
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(f"{ROUTING_SERVICE_URL}/asignaciones/envio/{envio_id}/reintentar")
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=503,
+            detail={"codigo": "ROUTING_NO_DISPONIBLE", "mensaje": "El servicio de rutas no responde. Intente de nuevo."},
+        )
+    if resp.status_code == 200:
+        return resp.json()
+    if resp.status_code == 404:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "codigo": "SIN_SOLICITUD_EN_ROUTING",
+                "mensaje": "Routing no tiene registrada la solicitud de este envío (pudo crearse mientras Routing estaba caído).",
+            },
+        )
+    raise HTTPException(
+        status_code=502,
+        detail={"codigo": "ROUTING_ERROR", "mensaje": f"El servicio de rutas respondió con error {resp.status_code}"},
+    )

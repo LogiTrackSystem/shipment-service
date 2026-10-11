@@ -1,22 +1,18 @@
-import os
 import uuid
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ..routing_client import obtener_ruta_maestra
 from ..database import get_db
-from ..models import Cliente, PruebaEntrega, Envio, EnvioEvento
+from ..estados import ESTADOS_ENTREGABLES, TRANSICIONES_MANUALES
 from ..events import publish_event
-from ..models import PruebaEntrega, Envio, EnvioEvento
+from ..models import Cliente, Envio, EnvioEvento, PruebaEntrega
+from ..routing_client import obtener_ruta_maestra, reintentar_asignacion
 from ..schemas import (
-    PruebaEntregaCrear, PruebaEntregaLeer, EnvioAsignar,
-    EnvioCrear, EnvioEventoLeer, EnvioLeer, EnvioActualizarEstado,
+    EnvioActualizarEstado, EnvioCrear, EnvioEventoLeer, EnvioLeer,
+    PruebaEntregaCrear, PruebaEntregaLeer,
 )
-
-FLEET_SERVICE_URL = os.getenv("FLEET_SERVICE_URL")
 
 router = APIRouter(prefix="/envios", tags=["envios"])
 
@@ -32,20 +28,17 @@ def _registrar_evento(db: Session, envio_id: uuid.UUID, tipo_evento: str, notas:
     db.add(EnvioEvento(envio_id=envio_id, tipo_evento=tipo_evento, notas=notas))
 
 
-async def _liberar_vehiculo(vehiculo_id):
-    """Cierra el hueco de 'vehiculos.estado nunca cambia': al completar o
-    devolver un envío, libera el vehículo de vuelta a 'active' en Fleet
-    Service, siempre que Shipment sepa cuál vehículo era (ver 'asignar' abajo)."""
-    if not FLEET_SERVICE_URL or not vehiculo_id:
-        return
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.patch(
-                f"{FLEET_SERVICE_URL}/vehiculos/{vehiculo_id}/estado",
-                json={"estado": "active"},
-            )
-    except Exception as exc:
-        print(f"[shipment] no se pudo liberar el vehículo {vehiculo_id}: {exc}")
+def _rechazar_transicion(envio: Envio, destino: str, permitidos) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "codigo": "TRANSICION_INVALIDA",
+            "mensaje": (
+                f"Un envío en estado '{envio.estado}' no puede pasar a '{destino}'. "
+                f"Solo se permite desde: {', '.join(permitidos)}."
+            ),
+        },
+    )
 
 
 @router.post("/", response_model=EnvioLeer, status_code=status.HTTP_201_CREATED)
@@ -137,12 +130,14 @@ async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
     })
     return envio
 
+
 @router.get("/codigo/{codigo_envio}", response_model=EnvioLeer)
 def obtener_envio_por_codigo(codigo_envio: str, db: Session = Depends(get_db)):
     envio = db.query(Envio).filter(Envio.codigo_envio == codigo_envio.strip().upper()).first()
     if envio is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Envío no encontrado")
     return envio
+
 
 @router.get("/", response_model=list[EnvioLeer])
 def listar_envios(estado: Optional[str] = None, cliente_id: Optional[uuid.UUID] = None, db: Session = Depends(get_db)):
@@ -170,21 +165,37 @@ def obtener_eventos_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
     )
 
 
-@router.patch("/{envio_id}/asignar", response_model=EnvioLeer)
-def asignar_envio(envio_id: uuid.UUID, payload: EnvioAsignar, db: Session = Depends(get_db)):
+@router.post("/{envio_id}/reintentar-asignacion")
+async def reintentar_asignacion_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Pide a Routing reintentar ahora la asignación de un envío que está esperando vehículo."""
     envio = _obtener_envio_o_404(db, envio_id)
-    envio.vehiculo_id = payload.vehiculo_id
-    envio.ruta_id = payload.ruta_id
-    _registrar_evento(db, envio.id, "asignado", notas=f"vehiculo_id={payload.vehiculo_id}")
-    db.commit()
-    db.refresh(envio)
-    return envio
+    if envio.estado not in ("pendiente", "sin_asignacion"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "codigo": "NO_ESTA_EN_ESPERA",
+                "mensaje": f"El envío está '{envio.estado}'; solo se reintenta si está 'pendiente' o 'sin_asignacion'.",
+            },
+        )
+    ruta = await reintentar_asignacion(envio.id)
+    return {
+        "envio_id": str(envio.id),
+        "codigo_envio": envio.codigo_envio,
+        "estado_asignacion": ruta.get("estado"),
+        "detalle": ruta.get("ultimo_error"),
+        "nota": "Si quedó asignada, el estado del envío se actualiza en unos segundos.",
+    }
 
 
 @router.patch("/{envio_id}/estado", response_model=EnvioLeer)
 async def actualizar_estado_envio(envio_id: uuid.UUID, payload: EnvioActualizarEstado, db: Session = Depends(get_db)):
     envio = _obtener_envio_o_404(db, envio_id)
+    permitidos = TRANSICIONES_MANUALES[payload.estado]
+    if envio.estado not in permitidos:
+        _rechazar_transicion(envio, payload.estado, permitidos)
+
     envio.estado = payload.estado
+    envio.estado_previo = None
     _registrar_evento(db, envio.id, payload.estado, notas=payload.notas)
     db.commit()
     db.refresh(envio)
@@ -192,9 +203,8 @@ async def actualizar_estado_envio(envio_id: uuid.UUID, payload: EnvioActualizarE
     if payload.estado == "con_incidencia":
         await publish_event("shipment.incident", {"envio_id": str(envio.id), "notas": payload.notas})
     elif payload.estado == "devuelto":
+        # Routing escucha este evento: libera la reserva en Fleet (vehículo y conductor)
         await publish_event("shipment.returned", {"envio_id": str(envio.id), "notas": payload.notas})
-        if envio.vehiculo_id:
-            await _liberar_vehiculo(str(envio.vehiculo_id))
     return envio
 
 
@@ -204,20 +214,22 @@ async def registrar_prueba_entrega(envio_id: uuid.UUID, payload: PruebaEntregaCr
     existente = db.query(PruebaEntrega).filter(PruebaEntrega.envio_id == envio_id).first()
     if existente is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este envío ya tiene una prueba de entrega registrada")
+    if envio.estado not in ESTADOS_ENTREGABLES:
+        _rechazar_transicion(envio, "entregado", ESTADOS_ENTREGABLES)
 
     prueba = PruebaEntrega(envio_id=envio_id, **payload.model_dump())
     db.add(prueba)
     envio.estado = "entregado"
+    envio.estado_previo = None
     _registrar_evento(db, envio.id, "entregado", notas=f"receptor={payload.nombre_receptor}")
     db.commit()
     db.refresh(prueba)
     db.refresh(envio)
 
+    # Routing escucha este evento: libera la reserva en Fleet y reasigna a los envíos en espera
     await publish_event("shipment.delivered", {
         "envio_id": str(envio.id),
         "entregado_en": prueba.entregado_en,
         "nombre_receptor": prueba.nombre_receptor,
     })
-    if envio.vehiculo_id:
-        await _liberar_vehiculo(str(envio.vehiculo_id))
     return prueba

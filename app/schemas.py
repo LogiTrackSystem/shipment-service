@@ -80,10 +80,6 @@ class EnvioCrear(BaseModel):
             raise ValueError("Debe enviar destino_id o destino_codigo (solo uno de los dos)")
         return self
 
-class EnvioAsignar(BaseModel):
-    vehiculo_id: uuid.UUID
-    ruta_id: Optional[uuid.UUID] = None
-
 
 class EnvioActualizarEstado(BaseModel):
     estado: Literal["en_transito", "con_incidencia", "devuelto"]
@@ -129,6 +125,13 @@ class EnvioLeer(BaseModel):
     duracion_horas: Optional[Decimal] = None
     vehiculo_id: Optional[uuid.UUID] = None
     ruta_id: Optional[uuid.UUID] = None
+    placa_vehiculo: Optional[str] = None
+    tipo_vehiculo: Optional[str] = None
+    conductor_id: Optional[uuid.UUID] = None
+    conductor_nombre: Optional[str] = None
+    codigo_conductor: Optional[int] = None
+    hora_estimada_llegada: Optional[datetime] = None
+    motivo_sin_asignacion: Optional[str] = None
     creado_en: datetime
     actualizado_en: datetime
 
