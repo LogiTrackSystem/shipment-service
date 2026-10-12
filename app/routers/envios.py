@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..flota_client import verificar_viabilidad
 from ..estados import ESTADOS_ENTREGABLES, TRANSICIONES_MANUALES
 from ..events import publish_event
 from ..models import Cliente, Envio, EnvioEvento, PruebaEntrega
@@ -76,6 +77,9 @@ async def crear_envio(payload: EnvioCrear, db: Session = Depends(get_db)):
                 "Puede omitir el campo: el sistema lo deduce."
             ),
         )
+    
+    # 3b) Falla rápida: si ningún vehículo de la flota podría transportar esta carga, se rechaza ya
+    await verificar_viabilidad(payload.peso_kg, payload.volumen_m3, payload.tipo_carga, payload.es_hazmat)
 
     # 4) Se guarda como 'pendiente'; la asignación de vehículo y conductor ocurre después, por eventos
     datos = payload.model_dump(exclude={
