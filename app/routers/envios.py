@@ -165,6 +165,14 @@ def obtener_eventos_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/{envio_id}/prueba-entrega", response_model=PruebaEntregaLeer)
+def obtener_prueba_entrega(envio_id: uuid.UUID, db: Session = Depends(get_db)):
+    _obtener_envio_o_404(db, envio_id)
+    prueba = db.query(PruebaEntrega).filter(PruebaEntrega.envio_id == envio_id).first()
+    if prueba is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Este envío aún no tiene prueba de entrega")
+    return prueba
+
 @router.post("/{envio_id}/reintentar-asignacion")
 async def reintentar_asignacion_envio(envio_id: uuid.UUID, db: Session = Depends(get_db)):
     """Pide a Routing reintentar ahora la asignación de un envío que está esperando vehículo."""

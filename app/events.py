@@ -1,17 +1,21 @@
+import asyncio
 import json
 import os
 import uuid
 from datetime import datetime
 
 import aio_pika
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .estados import ESTADOS_FINALES
-from .models import Envio, EnvioEvento
+from .estados import ESTADOS_ENTREGABLES, ESTADOS_FINALES
+from .models import Envio, EnvioEvento, PruebaEntrega
 
 RABBITMQ_URL = os.getenv("RABBITMQ_URL")
 EXCHANGE_NAME = "logitrack_events"
+ENTREGA_AUTOMATICA = os.getenv("ENTREGA_AUTOMATICA", "true").strip().lower() in ("1", "true", "si", "sí", "yes")
+RECEPTOR_SIMULADO = "Entrega simulada automática"
 
 
 async def publish_event(routing_key: str, payload: dict):
@@ -156,11 +160,93 @@ async def _procesar_customs_cleared(payload: dict):
         db.close()
 
 
+async def _publicar_con_reintentos(routing_key: str, payload: dict, intentos: int = 3):
+    for n in range(1, intentos + 1):
+        try:
+            await publish_event(routing_key, payload)
+            return
+        except Exception as exc:
+            print(f"[shipment] no se pudo publicar {routing_key} (intento {n}/{intentos}): {exc}")
+            if n < intentos:
+                await asyncio.sleep(n)
+
+
+# ---------- Viaje simulado (eventos de Tracking) ----------
+
+async def _procesar_trip_started(payload: dict):
+    db: Session = SessionLocal()
+    try:
+        envio = _buscar_envio(db, _a_uuid(payload.get("envio_id")))
+        if envio is None or envio.estado in ESTADOS_FINALES:
+            return
+        eta = _a_fecha(payload.get("hora_estimada_llegada"))
+        if eta is not None:
+            envio.hora_estimada_llegada = eta
+        if envio.estado == "asignado":
+            envio.estado = "en_transito"
+            db.add(EnvioEvento(
+                envio_id=envio.id,
+                tipo_evento="en_transito",
+                notas=f"el vehículo {payload.get('placa')} salió hacia {envio.destino}",
+            ))
+        elif envio.estado == "retenido_aduana":
+            envio.estado_previo = "en_transito"  # al liberar aduana, el viaje ya estaba en marcha
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _procesar_trip_arrived(payload: dict):
+    entrega = None
+    db: Session = SessionLocal()
+    try:
+        envio = _buscar_envio(db, _a_uuid(payload.get("envio_id")))
+        if envio is None or envio.estado not in ESTADOS_ENTREGABLES:
+            return
+        db.add(EnvioEvento(
+            envio_id=envio.id,
+            tipo_evento="llegada_destino",
+            notas=f"el vehículo {payload.get('placa')} llegó a {envio.destino}",
+        ))
+        ya_tiene_prueba = db.query(PruebaEntrega).filter(PruebaEntrega.envio_id == envio.id).first() is not None
+        if ENTREGA_AUTOMATICA and not ya_tiene_prueba:
+            prueba = PruebaEntrega(envio_id=envio.id, nombre_receptor=RECEPTOR_SIMULADO, simulada=True)
+            db.add(prueba)
+            envio.estado = "entregado"
+            envio.estado_previo = None
+            db.add(EnvioEvento(
+                envio_id=envio.id,
+                tipo_evento="entregado",
+                notas=f"receptor={RECEPTOR_SIMULADO} (prueba de entrega simulada)",
+            ))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()  # un operador registró la entrega al mismo tiempo
+                return
+            db.refresh(prueba)
+            entrega = {
+                "envio_id": str(envio.id),
+                "entregado_en": prueba.entregado_en,
+                "nombre_receptor": prueba.nombre_receptor,
+                "simulada": True,
+            }
+        else:
+            db.commit()
+    finally:
+        db.close()
+
+    if entrega:
+        # Routing escucha este evento: libera la reserva en Fleet y reasigna a los envíos en espera
+        await _publicar_con_reintentos("shipment.delivered", entrega)
+
 _HANDLERS = {
     "route.assigned": _procesar_route_assigned,
     "route.unassigned": _procesar_route_unassigned,
     "customs.held": _procesar_customs_held,
     "customs.cleared": _procesar_customs_cleared,
+    "tracking.trip_started": _procesar_trip_started,
+    "tracking.trip_arrived": _procesar_trip_arrived,
 }
 
 

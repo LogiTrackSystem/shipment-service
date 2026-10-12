@@ -78,6 +78,7 @@ class PruebaEntrega(Base):
     url_foto = Column(String(500), nullable=True)
     nombre_receptor = Column(String(150), nullable=False)
     entregado_en = Column(DateTime(timezone=True), server_default=func.now())
+    simulada = Column(Boolean, nullable=False, server_default=text("false"))
 
 
 class EnvioEvento(Base):

@@ -143,3 +143,4 @@ class PruebaEntregaLeer(BaseModel):
     url_foto: Optional[str] = None
     nombre_receptor: str
     entregado_en: datetime
+    simulada: bool = False
