@@ -2,6 +2,7 @@ import os
 from typing import Optional
 
 import httpx
+from .interno import cabeceras_internas
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
@@ -35,7 +36,7 @@ async def calcular_cotizacion(peso_kg, distancia_km, cliente_id=None) -> Optiona
     if cliente_id is not None:
         cuerpo["cliente_id"] = str(cliente_id)
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S, headers=cabeceras_internas()) as client:
             resp = await client.post(f"{BILLING_SERVICE_URL}/cotizaciones/calcular", json=cuerpo)
     except httpx.HTTPError as exc:
         raise _no_disponible(type(exc).__name__)

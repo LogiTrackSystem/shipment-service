@@ -1,6 +1,7 @@
 import os
 
 import httpx
+from .interno import cabeceras_internas
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
@@ -28,7 +29,7 @@ async def obtener_ruta_maestra(origen_id, origen_codigo, destino_id, destino_cod
     cuerpo = {k: v for k, v in cuerpo.items() if v is not None}
 
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S, headers=cabeceras_internas()) as client:
             resp = await client.post(f"{ROUTING_SERVICE_URL}/rutas-maestras/calcular", json=cuerpo)
     except httpx.HTTPError:
         raise HTTPException(
@@ -61,7 +62,7 @@ async def reintentar_asignacion(envio_id) -> dict:
             detail={"codigo": "ROUTING_NO_CONFIGURADO", "mensaje": "Falta ROUTING_SERVICE_URL en Shipment Service"},
         )
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=45.0, headers=cabeceras_internas()) as client:
             resp = await client.post(f"{ROUTING_SERVICE_URL}/asignaciones/envio/{envio_id}/reintentar")
     except httpx.HTTPError:
         raise HTTPException(

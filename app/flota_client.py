@@ -1,6 +1,7 @@
 import os
 
 import httpx
+from .interno import cabeceras_internas
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
@@ -24,7 +25,7 @@ async def verificar_viabilidad(peso_kg, volumen_m3, tipo_carga, es_hazmat, es_di
     if volumen_m3 is not None:
         cuerpo["volumen_m3"] = float(volumen_m3)
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+        async with httpx.AsyncClient(timeout=TIMEOUT_S, headers=cabeceras_internas()) as client:
             resp = await client.post(f"{FLEET_SERVICE_URL}/reservas/viabilidad", json=cuerpo)
     except httpx.HTTPError as exc:
         print(f"[shipment] no se pudo consultar la viabilidad en Fleet (se acepta el envío): {type(exc).__name__}")
