@@ -9,12 +9,27 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Cliente
 from ..schemas import ClienteActualizar, ClienteCrear, ClienteLeer
+from ..seguridad import Contexto, obtener_contexto
 
 router = APIRouter(prefix="/clientes", tags=["clientes"])
 
 
+def _no_cliente(ctx: Contexto) -> None:
+    if ctx.es_cliente:
+        raise HTTPException(
+            status_code=403,
+            detail={"codigo": "SIN_PERMISO", "mensaje": "Su rol no puede crear ni modificar clientes"},
+        )
+
+
+def _ajeno(ctx: Contexto, cliente: Cliente) -> bool:
+    """Una cuenta de cliente solo puede ver su propio registro (los demás responden 404)."""
+    return ctx.es_cliente and cliente.id != ctx.cliente_id
+
+
 @router.post("/", response_model=ClienteLeer, status_code=201)
-def crear_cliente(payload: ClienteCrear, db: Session = Depends(get_db)):
+def crear_cliente(payload: ClienteCrear, db: Session = Depends(get_db), ctx: Contexto = Depends(obtener_contexto)):
+    _no_cliente(ctx)
     cliente = Cliente(**payload.model_dump())
     db.add(cliente)
     try:
@@ -32,9 +47,13 @@ def listar_clientes(
     activo: Optional[bool] = None,
     limite: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
+    ctx: Contexto = Depends(obtener_contexto),
 ):
-    """Búsqueda para el selector del frontend: por nombre, documento o código de cliente."""
+    """Búsqueda para el selector del frontend: por nombre, documento o código de cliente.
+    Una cuenta de cliente solo ve su propio registro."""
     query = db.query(Cliente)
+    if ctx.es_cliente:
+        query = query.filter(Cliente.id == ctx.cliente_id)
     if activo is not None:
         query = query.filter(Cliente.activo == activo)
     if q:
@@ -50,23 +69,27 @@ def listar_clientes(
 
 
 @router.get("/codigo/{codigo}", response_model=ClienteLeer)
-def obtener_cliente_por_codigo(codigo: int, db: Session = Depends(get_db)):
+def obtener_cliente_por_codigo(codigo: int, db: Session = Depends(get_db), ctx: Contexto = Depends(obtener_contexto)):
     cliente = db.query(Cliente).filter(Cliente.codigo_cliente == codigo).first()
-    if cliente is None:
+    if cliente is None or _ajeno(ctx, cliente):
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
     return cliente
 
 
 @router.get("/{cliente_id}", response_model=ClienteLeer)
-def obtener_cliente(cliente_id: uuid.UUID, db: Session = Depends(get_db)):
+def obtener_cliente(cliente_id: uuid.UUID, db: Session = Depends(get_db), ctx: Contexto = Depends(obtener_contexto)):
     cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
-    if cliente is None:
+    if cliente is None or _ajeno(ctx, cliente):
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
     return cliente
 
 
 @router.patch("/{cliente_id}", response_model=ClienteLeer)
-def actualizar_cliente(cliente_id: uuid.UUID, payload: ClienteActualizar, db: Session = Depends(get_db)):
+def actualizar_cliente(
+    cliente_id: uuid.UUID, payload: ClienteActualizar, db: Session = Depends(get_db),
+    ctx: Contexto = Depends(obtener_contexto),
+):
+    _no_cliente(ctx)
     cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
     if cliente is None:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")

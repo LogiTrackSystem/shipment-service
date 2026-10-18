@@ -69,11 +69,14 @@ class EnvioCrear(BaseModel):
     volumen_m3: Optional[Decimal] = Field(None, ge=0)
     tipo_carga: Literal["general", "refrigerada"] = "general"
     es_hazmat: bool = False
+    es_divisible: bool = False  # solo importa si la carga no cabe en un solo vehículo
+    monto_aceptado_cop: Optional[Decimal] = Field(None, ge=0)  # precio de POST /envios/cotizar que el cliente aceptó
+    fecha_programada: Optional[datetime] = None  # futura; sin zona horaria se interpreta como hora de Colombia (UTC-5)
 
     @model_validator(mode="after")
     def _referencias(self):
-        if (self.cliente_id is None) == (self.codigo_cliente is None):
-            raise ValueError("Debe enviar cliente_id o codigo_cliente (solo uno de los dos)")
+        if self.cliente_id is not None and self.codigo_cliente is not None:
+            raise ValueError("Envíe cliente_id o codigo_cliente, no ambos (una cuenta de cliente puede omitirlos)")
         if (self.origen_id is None) == (self.origen_codigo is None):
             raise ValueError("Debe enviar origen_id o origen_codigo (solo uno de los dos)")
         if (self.destino_id is None) == (self.destino_codigo is None):
@@ -84,6 +87,15 @@ class EnvioCrear(BaseModel):
 class EnvioActualizarEstado(BaseModel):
     estado: Literal["en_transito", "con_incidencia", "devuelto"]
     notas: Optional[str] = None
+
+
+class EnvioReprogramar(BaseModel):
+    fecha_programada: datetime
+    motivo: Optional[str] = Field(None, max_length=300)
+
+
+class EnvioCancelar(BaseModel):
+    motivo: Optional[str] = Field(None, max_length=300)
 
 
 class PruebaEntregaCrear(BaseModel):
@@ -113,12 +125,19 @@ class EnvioLeer(BaseModel):
     codigo_pais_origen: Optional[str] = None
     codigo_pais_destino: Optional[str] = None
     estado: str
+    envio_padre_id: Optional[uuid.UUID] = None   # si es una parte de un pedido dividido
+    parte_numero: Optional[int] = None
+    partes_total: Optional[int] = None           # si es un pedido dividido
+    partes_entregadas: Optional[int] = None
+    fecha_programada: Optional[datetime] = None
     fecha_limite_sla: Optional[datetime] = None
     es_internacional: bool
     tipo_carga: str
     es_hazmat: bool
+    es_divisible: bool = False
     peso_kg: Decimal
     volumen_m3: Optional[Decimal] = None
+    monto_cop: Optional[Decimal] = None
     ruta_maestra_id: Optional[uuid.UUID] = None
     codigo_ruta: Optional[str] = None
     distancia_km: Optional[Decimal] = None
@@ -144,3 +163,58 @@ class PruebaEntregaLeer(BaseModel):
     nombre_receptor: str
     entregado_en: datetime
     simulada: bool = False
+
+
+# ---------- Usuarios y sesión ----------
+
+ROL = Literal["cliente", "operador", "gestor_flota", "administrador"]
+
+
+class LoginSolicitud(BaseModel):
+    email: str = Field(..., max_length=150, pattern=EMAIL_PATTERN)
+    password: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v):
+        return v.strip().lower()
+
+
+class UsuarioCrear(BaseModel):
+    email: str = Field(..., max_length=150, pattern=EMAIL_PATTERN)
+    nombre: str = Field(..., min_length=2, max_length=150)
+    password: str = Field(..., min_length=8, max_length=128)
+    rol: ROL
+    cliente_id: Optional[uuid.UUID] = None
+    codigo_cliente: Optional[int] = None
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v):
+        return v.strip().lower()
+
+
+class UsuarioActualizar(BaseModel):
+    nombre: Optional[str] = Field(None, min_length=2, max_length=150)
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
+    activo: Optional[bool] = None
+
+
+class UsuarioLeer(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    email: str
+    nombre: str
+    rol: str
+    cliente_id: Optional[uuid.UUID] = None
+    codigo_cliente: Optional[int] = None
+    activo: bool
+    ultimo_acceso: Optional[datetime] = None
+    creado_en: datetime
+
+
+class TokenRespuesta(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    usuario: UsuarioLeer
