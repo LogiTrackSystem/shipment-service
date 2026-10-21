@@ -213,6 +213,54 @@ class UsuarioLeer(BaseModel):
     creado_en: datetime
 
 
+ROLES_REGISTRO = ("cliente", "operador", "gestor_flota")
+
+
+class RegistroSolicitud(BaseModel):
+    """Alta pública de cuenta. rol='cliente' (por defecto) crea además el registro de cliente con su código;
+    'operador' y 'gestor_flota' exigen el código de acceso que conoce el administrador."""
+    nombre: str = Field(..., min_length=2, max_length=150)
+    email: str = Field(..., max_length=150, pattern=EMAIL_PATTERN)
+    password: str = Field(..., min_length=8, max_length=128)
+    rol: str = "cliente"
+    # Datos del cliente (solo rol 'cliente')
+    tipo_documento: Optional[Literal["CC", "CE", "NIT", "PAS"]] = None
+    numero_documento: Optional[str] = Field(None, min_length=3, max_length=30)
+    telefono: Optional[str] = Field(None, max_length=30)
+    direccion: Optional[str] = Field(None, max_length=255)
+    # Solo roles de trabajo
+    codigo_acceso: Optional[str] = Field(None, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, v):
+        return v.strip().lower()
+
+    @field_validator("nombre", "numero_documento")
+    @classmethod
+    def _limpiar(cls, v):
+        return v.strip() if v else v
+
+    @field_validator("rol")
+    @classmethod
+    def _rol(cls, v):
+        v = (v or "").strip().lower()
+        if v == "administrador":
+            raise ValueError("El rol administrador no se puede crear por registro")
+        if v not in ROLES_REGISTRO:
+            raise ValueError("Rol no válido: use cliente, operador o gestor_flota")
+        return v
+
+    @model_validator(mode="after")
+    def _segun_rol(self):
+        if self.rol == "cliente":
+            if not self.tipo_documento or not self.numero_documento:
+                raise ValueError("Un cliente debe indicar tipo_documento y numero_documento")
+        elif not self.codigo_acceso:
+            raise ValueError("Los roles de trabajo requieren el código de acceso del administrador")
+        return self
+
+
 class TokenRespuesta(BaseModel):
     access_token: str
     token_type: str = "bearer"
