@@ -1,3 +1,4 @@
+import os
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -27,4 +28,4 @@ app.include_router(usuarios.router)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "shipment-service"}
+    return {"status": "ok", "service": "shipment-service", "version": os.getenv("APP_VERSION", "dev")}

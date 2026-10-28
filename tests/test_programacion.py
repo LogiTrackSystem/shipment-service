@@ -216,9 +216,9 @@ def test_el_vigilante_activa_solo_lo_vencido_y_publica_shipment_created(api, db,
 
 
 def test_el_evento_diferido_es_igual_al_de_un_envio_normal(api, db, entorno, fleet):
-    inmediato = crear(api, entorno)
+    crear(api, entorno)
     ev_normal = entorno["publicados"][0][1]
-    programado = _programar(api, entorno, db)
+    _programar(api, entorno, db)
     publicados = []
 
     async def publicar(clave, cuerpo):
@@ -233,7 +233,7 @@ def test_el_evento_diferido_es_igual_al_de_un_envio_normal(api, db, entorno, fle
 
 
 def test_si_falla_la_publicacion_el_envio_sigue_programado_y_se_reintenta(api, db, entorno, fleet):
-    eid = _programar(api, entorno, db)
+    _programar(api, entorno, db)
     intentos = []
 
     async def falla(clave, cuerpo):
@@ -254,7 +254,7 @@ def test_si_falla_la_publicacion_el_envio_sigue_programado_y_se_reintenta(api, d
 
 
 def test_un_envio_cancelado_o_ya_activo_no_se_vuelve_a_activar(api, db, entorno, fleet):
-    a = _programar(api, entorno, db)
+    _programar(api, entorno, db)
     envio = db.query(Envio).one(); envio.estado = "cancelado"; db.commit()
     publicados = []
 
