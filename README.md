@@ -21,3 +21,11 @@ FastAPI + SQLAlchemy + Alembic + PostgreSQL + RabbitMQ (aio-pika).
 - `PATCH /envios/{id}/asignar` — asignar vehículo y ruta
 - `PATCH /envios/{id}/estado` — actualizar estado
 - `POST /envios/{id}/prueba-entrega` — registrar prueba de entrega
+- `POST /auth/login` — iniciar sesión (devuelve token Bearer)
+- `POST /auth/registro` — alta pública de cuenta (devuelve token, igual que el login)
+
+## Registro de cuentas (`POST /auth/registro`)
+- **Cliente** (por defecto): envía `nombre`, `email`, `password`, `tipo_documento` y `numero_documento`. No necesita credenciales de nadie. El sistema crea el cliente y su cuenta, y le asigna el **código de cliente** (`usuario.codigo_cliente`, desde 1000000001); no se digita.
+- **Operador / gestor de flota**: `rol` + `codigo_acceso`, que es el valor de la variable `CODIGO_REGISTRO_PERSONAL`, conocido solo por el administrador. Sin esa variable (o con menos de 8 caracteres) este registro queda cerrado. Tras `REGISTRO_MAX_FALLOS` intentos fallidos en `REGISTRO_VENTANA_S` segundos responde 429.
+- **Administrador**: nunca por registro; lo crea otro administrador (`POST /usuarios`) o, el primero, `python -m app.crear_usuario`.
+- Si el documento ya pertenece a un cliente existente, el registro responde 409 y NO liga la cuenta nueva a ese cliente (quien ya es cliente pide al administrador que le cree el acceso).

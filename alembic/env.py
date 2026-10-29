@@ -8,7 +8,7 @@ from alembic import context
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from app.database import Base
-from app.models import Envio, PruebaEntrega, EnvioEvento
+from app.models import Cliente, Envio, PruebaEntrega, EnvioEvento
 
 load_dotenv()
 
