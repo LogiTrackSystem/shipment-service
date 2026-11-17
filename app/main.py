@@ -2,6 +2,7 @@ import os
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 from .interno import proteger_servicio
 
 from .routers import auth, clientes, envios, usuarios
@@ -24,6 +25,10 @@ app.include_router(envios.router)
 app.include_router(clientes.router)
 app.include_router(auth.router)
 app.include_router(usuarios.router)
+
+
+# Métricas para Prometheus (GET /metrics): peticiones por método/estado y tiempos de respuesta
+Instrumentator(excluded_handlers=["/metrics"]).instrument(app).expose(app, include_in_schema=False)
 
 
 @app.get("/health")

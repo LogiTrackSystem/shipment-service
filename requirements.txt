@@ -26,3 +26,5 @@ typing_extensions==4.16.0
 uvicorn==0.53.0
 yarl==1.25.1
 httpx==0.28.1
+prometheus-client==0.26.0
+prometheus-fastapi-instrumentator==8.1.0
